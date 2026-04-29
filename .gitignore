@@ -1,0 +1,9 @@
+.env
+__pycache__/
+*.pyc
+*.log
+today_input.txt
+weekly_input.txt
+*_업무보고.txt
+*_주간보고.txt
+logs/
