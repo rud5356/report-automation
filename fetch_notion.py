@@ -25,6 +25,9 @@ load_env()
 NOTION_TOKEN = os.getenv("NOTION_TOKEN", "")
 DATABASE_ID = os.getenv("NOTION_DATABASE_ID", "17f3a29d85cf83a4931781dd2554fb09")
 
+# ▼ [추가] 프로젝트별 업무 기록 DB ID
+RECORD_DATABASE_ID = "4a24dc34ecde4ce193e00ef0564a8857"
+
 if not NOTION_TOKEN or NOTION_TOKEN == "secret_여기에_토큰_입력":
     print("ERROR: .env 파일에 NOTION_TOKEN을 입력하세요.")
     sys.exit(1)
@@ -155,6 +158,166 @@ def build_input(today_items: list, tomorrow_items: list) -> str:
     return "\n".join(lines)
 
 
+# ▼ [추가] 기술 태그 키워드 매핑 — 제목+본문+비고에서 키워드 감지
+# 필요한 키워드는 직접 추가/수정하세요
+TECH_TAG_KEYWORDS = {
+    "GPT":    ["gpt", "chatgpt", "openai", "llm", "프롬프트", "prompt"],
+    "Python": ["python", "파이썬", ".py", "스크립트", "pandas", "numpy", "requests"],
+    "Excel":  ["excel", "엑셀", ".xlsx", ".xls", "스프레드시트"],
+    "R":      [" r ", "rstudio", "tidyverse", "ggplot"],
+    "GIS":    ["gis", "qgis", "arcgis", "공간분석", "shp", "shapefile", "좌표"],
+    "BERT":   ["bert", "klue", "huggingface", "transformers", "임베딩", "fine-tuning", "파인튜닝"],
+    "SQL":    ["sql", "쿼리", "query", "database", "db", "sqlite", "mysql"],
+}
+
+# ▼ [추가] 데이터 태그 키워드 매핑
+# 필요한 키워드는 직접 추가/수정하세요
+DATA_TAG_KEYWORDS = {
+    "생물데이터":  ["생물", "종", "분류", "gbif", "species", "생태", "식물", "동물", "곤충", "서식"],
+    "정책데이터":  ["정책", "법령", "고시", "지침", "계획", "전략", "biofin", "이행점검", "지표"],
+    "통계데이터":  ["통계", "지수", "수치", "집계", "분포", "빈도", "백분율", "%"],
+    "문헌데이터":  ["논문", "문헌", "보고서", "참고자료", "자료조사", "literature", "paper"],
+    "공간데이터":  ["공간", "지도", "map", "좌표", "gis", "위경도", "shp", "레이어"],
+}
+
+
+def infer_tech_tags(text: str) -> list:
+    """제목+본문+비고 텍스트에서 기술 태그를 추론합니다."""
+    text_lower = text.lower()
+    tags = []
+    for tag, keywords in TECH_TAG_KEYWORDS.items():
+        if any(kw in text_lower for kw in keywords):
+            tags.append({"name": tag})
+    return tags
+
+
+def infer_data_tags(text: str) -> list:
+    """제목+본문+비고 텍스트에서 데이터 태그를 추론합니다."""
+    text_lower = text.lower()
+    tags = []
+    for tag, keywords in DATA_TAG_KEYWORDS.items():
+        if any(kw in text_lower for kw in keywords):
+            tags.append({"name": tag})
+    return tags
+
+
+# ▼ [추가] 업무구분 → 역할 태그 매핑
+CATEGORY_TO_ROLE = {
+    "발표자료작성": "발표자료작성",
+    "보고자료 작성": "보고자료 작성",
+    "제안서 작성": "제안서 작성",
+    "분석/모델링": "분석/모델링",
+    "데이터정리": "데이터정리",
+    "자료조사": "자료조사",
+    "행정업무": "행정업무",
+    "회의": "회의",
+    "공부": "자료조사",       # 가장 가까운 태그로 매핑
+    "환경세팅": "행정업무",   # 가장 가까운 태그로 매핑
+    "협업 대응": "회의",      # 가장 가까운 태그로 매핑
+}
+
+# ▼ [추가] 기술 태그 키워드 → DB 태그명
+#   키워드가 제목 또는 본문에 포함되면 해당 태그를 붙여요.
+#   필요한 키워드는 자유롭게 추가/수정하세요.
+TECH_TAG_KEYWORDS: dict[str, list[str]] = {
+    "GPT":    ["gpt", "chatgpt", "openai", "프롬프트", "prompt"],
+    "Python": ["python", "파이썬", ".py", "스크립트", "pandas", "numpy", "fastapi"],
+    "Excel":  ["excel", "엑셀", ".xlsx", ".csv"],
+    "R":      [" r ", "ggplot", "tidyverse", "rmarkdown"],   # 단독 'R' 오탐 방지용 공백
+    "GIS":    ["gis", "qgis", "arcgis", "공간분석", "shp", "geojson"],
+    "BERT":   ["bert", "klue", "kobert", "huggingface", "transformers", "임베딩", "embedding"],
+    "SQL":    ["sql", "쿼리", "query", "database", "postgresql", "mysql", "sqlite"],
+}
+
+# ▼ [추가] 데이터 태그 키워드 → DB 태그명
+DATA_TAG_KEYWORDS: dict[str, list[str]] = {
+    "생물데이터":  ["생물", "species", "gbif", "분류군", "표본", "서식지", "생태"],
+    "정책데이터":  ["정책", "법령", "고시", "지침", "제도", "보고서", "계획"],
+    "통계데이터":  ["통계", "지표", "수치", "집계", "분석결과", "측정"],
+    "문헌데이터":  ["논문", "문헌", "paper", "journal", "참고자료", "레퍼런스"],
+    "공간데이터":  ["공간", "지도", "map", "좌표", "위경도", "래스터", "벡터"],
+}
+
+
+def infer_tags(keywords_map: dict[str, list[str]], text: str) -> list[str]:
+    """텍스트에서 키워드를 찾아 매칭되는 태그 목록을 반환합니다."""
+    text_lower = text.lower()
+    matched = []
+    for tag, keywords in keywords_map.items():
+        if any(kw in text_lower for kw in keywords):
+            matched.append(tag)
+    return matched
+
+# ▼ [추가] 완료 항목을 프로젝트별 업무 기록 DB에 저장
+def push_to_record_db(items: list, date_str: str):
+    """상태가 '완료'인 항목을 프로젝트별 업무 기록 DB에 추가합니다."""
+    url = "https://api.notion.com/v1/pages"
+    done_items = [t for t in items if t["status"] == "완료"]
+
+
+    if not done_items:
+        print("  기록할 완료 항목 없음 — 프로젝트별 업무 기록 DB 업데이트 건너뜀")
+        return
+
+    success, fail = 0, 0
+    for task in done_items:
+        # 역할 태그 변환
+        role_tag = CATEGORY_TO_ROLE.get(task["category"], "")
+        role_multi = [{"name": role_tag}] if role_tag else []
+
+        # 비고를 '한 일' 제목에 보충 (본문이 있으면 첫 줄 요약 포함)
+        title = task["title"]
+        if task["body"]:
+            first_line = task["body"].split("\n")[0].strip()
+            if first_line and first_line != title:
+                title = f"{title} — {first_line}"
+
+        # ▼ [추가] 제목+본문+비고 합쳐서 태그 추론
+        full_text = " ".join([task["title"], task["body"], task["note"]])
+        tech_tags = infer_tech_tags(full_text)
+        data_tags = infer_data_tags(full_text)
+
+        payload = {
+            "parent": {"database_id": RECORD_DATABASE_ID},
+            "properties": {
+                "한 일": {
+                    "title": [{"text": {"content": title}}]
+                },
+                "날짜": {
+                    "date": {"start": date_str}
+                },
+                "프로젝트": {
+                    "select": {"name": task["project"]} if task["project"] else None
+                },
+                "역할 태그": {
+                    "multi_select": role_multi
+                },
+                "기술 태그": {
+                    "multi_select": tech_tags
+                },
+                "데이터 태그": {
+                    "multi_select": data_tags
+                },
+                "비고": {
+                    "rich_text": [{"text": {"content": task["note"]}}] if task["note"] else []
+                },
+            }
+        }
+
+        # 프로젝트가 없으면 select를 null로 넣으면 오류 — 제거
+        if not task["project"]:
+            del payload["properties"]["프로젝트"]
+
+        res = requests.post(url, headers=HEADERS, json=payload)
+        if res.status_code == 200:
+            success += 1
+        else:
+            fail += 1
+            print(f"  WARN: '{task['title']}' 기록 실패 ({res.status_code}): {res.text[:100]}")
+
+    print(f"  프로젝트별 업무 기록 DB 저장 완료: {success}건 성공" + (f", {fail}건 실패" if fail else ""))
+
+
 if __name__ == "__main__":
     today = date.today().isoformat()
     tomorrow = (date.today() + timedelta(days=1)).isoformat()
@@ -172,3 +335,6 @@ if __name__ == "__main__":
         f.write(content)
 
     print(f"  today_input.txt 저장 완료")
+
+    # ▼ [추가] 완료 항목 → 프로젝트별 업무 기록 DB에 저장
+    push_to_record_db(today_items, today)
